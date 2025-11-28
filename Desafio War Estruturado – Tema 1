@@ -1,1 +1,406 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <locale.h>
+#include <ctype.h>
+#include <errno.h>
+
+#define NUM_TERRITORIES 12
+#define MAX_NAME_LEN 32
+#define NUM_MISSIONS 2
+#define INPUT_BUF 128
+
+// Cores (exércitos)
+enum Color { NONE = 0, RED = 1, BLUE = 2, GREEN = 3, YELLOW = 4, BLACK = 5 };
+
+// Missão tipos
+enum MissionType { M_DESTROY_ARMY = 1, M_CONQUER_N_TERRITORIES = 2 };
+
+typedef struct {
+    char name[MAX_NAME_LEN];
+    enum Color owner; // qual exército domina
+    int troops;       // número de tropas no território
+} Territory;
+
+typedef struct {
+    int id;                 // id da missão
+    enum MissionType type;  // tipo de missão
+    enum Color targetColor; // usado para destruição de exército
+    int targetCount;        // usado para conquistar N territórios
+} Mission;
+
+/* ---------- Prototipos ---------- */
+/* setup / memoria */
+Territory* alocarMapa(size_t n);
+void liberarMemoria(Territory* map);
+
+/* inicializacao */
+void inicializarTerritorios(Territory* map, size_t n);
+
+/* exibicao / interface */
+void exibirMapa(const Territory* map, size_t n);
+void exibirMenuPrincipal(void);
+void exibirMissao(const Mission* m);
+void pausarTela(void);
+
+/* jogo / lógica */
+void faseDeAtaque(Territory* map, size_t n, enum Color playerColor);
+void simularAtaque(Territory* atacante, Territory* defensor);
+Mission sortearMissao(enum Color jogador);
+int verificarVitoria(const Territory* map, size_t n, const Mission* m, enum Color playerColor);
+
+/* util */
+const char* nomeCor(enum Color c);
+int lerInteiro(const char* prompt, int min, int max);
+char lerCharConfirmacao(const char* prompt);
+
+/* ---------- Implementação ---------- */
+
+Territory* alocarMapa(size_t n) {
+    Territory* m = (Territory*) calloc(n, sizeof(Territory));
+    return m;
+}
+
+void liberarMemoria(Territory* map) {
+    if (map) free(map);
+}
+
+void inicializarTerritorios(Territory* map, size_t n) {
+    // nomes simples para exemplo
+    const char* nomes[NUM_TERRITORIES] = {
+        "Alameda", "Bastião", "Cedro", "Dunas",
+        "Estrela", "Fronteira", "Geleira", "Herdade",
+        "Ilha", "Junco", "Kor", "Litoranea"
+    };
+
+    // distribuir donos e tropas iniciais
+    // ciclo de cores
+    enum Color cores[] = { RED, BLUE, GREEN, YELLOW, BLACK };
+    size_t ncores = sizeof(cores)/sizeof(cores[0]);
+
+    for (size_t i = 0; i < n; ++i) {
+        strncpy(map[i].name, nomes[i % NUM_TERRITORIES], MAX_NAME_LEN-1);
+        map[i].name[MAX_NAME_LEN-1] = '\0';
+        map[i].owner = cores[i % ncores];
+        // tropas random de 1 a 8
+        map[i].troops = (rand() % 8) + 1;
+    }
+}
+
+void exibirMapa(const Territory* map, size_t n) {
+    printf("\n--- MAPA ATUAL ---\n");
+    printf("%-3s %-15s %-10s %-7s\n", "ID", "TERRITÓRIO", "DONO", "TROPAS");
+    printf("------------------------------------------------\n");
+    for (size_t i = 0; i < n; ++i) {
+        printf("%-3zu %-15s %-10s %-7d\n",
+               i,
+               map[i].name,
+               nomeCor(map[i].owner),
+               map[i].troops);
+    }
+    printf("------------------------------------------------\n");
+}
+
+void exibirMenuPrincipal(void) {
+    printf("\n--- MENU ---\n");
+    printf("1 - Fase de Ataque\n");
+    printf("2 - Verificar Missão / Checar Vitória\n");
+    printf("0 - Sair\n");
+    printf("Escolha: ");
+}
+
+void exibirMissao(const Mission* m) {
+    printf("\n--- MISSÃO SECRETA ---\n");
+    if (!m) {
+        printf("Nenhuma missão.\n");
+        return;
+    }
+    if (m->type == M_DESTROY_ARMY) {
+        printf("Destruir o exército %s (eliminar todos os territórios desse exército).\n", nomeCor(m->targetColor));
+    } else if (m->type == M_CONQUER_N_TERRITORIES) {
+        printf("Conquistar %d territórios (sob seu controle). \n", m->targetCount);
+    } else {
+        printf("Missão desconhecida.\n");
+    }
+}
+
+int lerInteiro(const char* prompt, int min, int max) {
+    char buf[INPUT_BUF];
+    long val;
+    char* end;
+    while (1) {
+        if (prompt) printf("%s", prompt);
+        if (!fgets(buf, sizeof(buf), stdin)) return min;
+        errno = 0;
+        val = strtol(buf, &end, 10);
+        if (end == buf || errno == ERANGE) {
+            printf("Entrada inválida. Tente novamente.\n");
+            continue;
+        }
+        if (val < min || val > max) {
+            printf("Valor fora do intervalo (%d - %d). Tente novamente.\n", min, max);
+            continue;
+        }
+        return (int) val;
+    }
+}
+
+char lerCharConfirmacao(const char* prompt) {
+    char buf[INPUT_BUF];
+    if (prompt) printf("%s", prompt);
+    if (!fgets(buf, sizeof(buf), stdin)) return 'n';
+    // procurar primeiro caractere não branco
+    for (size_t i = 0; buf[i] != '\0'; ++i) {
+        if (!isspace((unsigned char)buf[i])) return buf[i];
+    }
+    return 'n';
+}
+
+void pausarTela(void) {
+    printf("\nPressione Enter para continuar...");
+    char buf[INPUT_BUF];
+    fgets(buf, sizeof(buf), stdin);
+}
+
+void faseDeAtaque(Territory* map, size_t n, enum Color playerColor) {
+    printf("\n--- FASE DE ATAQUE ---\n");
+    exibirMapa(map, n);
+    int idFrom = lerInteiro("Digite o ID do território de ORIGEM (seu): ", 0, (int)n-1);
+
+    if (map[idFrom].owner != playerColor) {
+        printf("Você não controla esse território.\n");
+        return;
+    }
+
+    if (map[idFrom].troops < 2) {
+        printf("Tropas insuficientes (é necessário pelo menos 2 para atacar).\n");
+        return;
+    }
+
+    int idTo = lerInteiro("Digite o ID do território de DESTINO (inimigo): ", 0, (int)n-1);
+
+    if (map[idTo].owner == playerColor) {
+        printf("Não pode atacar seu próprio território.\n");
+        return;
+    }
+
+    char ch = lerCharConfirmacao(
+        "Confirmar ataque? (s/n): ");
+    if (ch != 's' && ch != 'S') {
+        printf("Ataque cancelado.\n");
+        return;
+    }
+
+    // simula ataque
+    simularAtaque(&map[idFrom], &map[idTo]);
+}
+
+void simularAtaque(Territory* atacante, Territory* defensor) {
+    // Regras simples próximas ao Risk:
+    // atacante pode rolar até min(3, tropas-1)
+    // defensor pode rolar até min(2, tropas)
+    int initialAtk = atacante->troops; // salvar antes das perdas
+    if (initialAtk <= 1) {
+        printf("Atacante sem tropas suficientes.\n");
+        return;
+    }
+    int atkDice = initialAtk > 3 ? 3 : (initialAtk - 1);
+    if (atkDice < 1) atkDice = 1;
+    int defDice = defensor->troops >= 2 ? 2 : 1;
+
+    // rolar dados
+    int atkRolls[3] = {0}, defRolls[2] = {0};
+    for (int i = 0; i < atkDice; ++i) atkRolls[i] = (rand() % 6) + 1;
+    for (int i = 0; i < defDice; ++i) defRolls[i] = (rand() % 6) + 1;
+
+    // ordenar decrescente (bolha simples pois poucos elementos)
+    for (int i = 0; i < atkDice - 1; ++i)
+        for (int j = i+1; j < atkDice; ++j)
+            if (atkRolls[j] > atkRolls[i]) {
+                int t = atkRolls[i]; atkRolls[i] = atkRolls[j]; atkRolls[j] = t;
+            }
+
+    for (int i = 0; i < defDice - 1; ++i)
+        for (int j = i+1; j < defDice; ++j)
+            if (defRolls[j] > defRolls[i]) {
+                int t = defRolls[i]; defRolls[i] = defRolls[j]; defRolls[j] = t;
+            }
+
+    printf("\nDados do atacante (%d dados): ", atkDice);
+    for (int i = 0; i < atkDice; ++i) printf("%d ", atkRolls[i]);
+    printf("\nDados do defensor (%d dados): ", defDice);
+    for (int i = 0; i < defDice; ++i) printf("%d ", defRolls[i]);
+    printf("\n");
+
+    // comparar pares
+    int comparisons = atkDice < defDice ? atkDice : defDice;
+    int atkLoss = 0, defLoss = 0;
+    for (int i = 0; i < comparisons; ++i) {
+        if (atkRolls[i] > defRolls[i]) {
+            // defensor perde uma tropa
+            defLoss++;
+        } else {
+            // atacante perde uma tropa (empate favorece defensor)
+            atkLoss++;
+        }
+    }
+
+    // aplicar perdas
+    atacante->troops = initialAtk - atkLoss;
+    defensor->troops -= defLoss;
+
+    if (defensor->troops < 0) defensor->troops = 0;
+    if (atacante->troops < 0) atacante->troops = 0;
+
+    printf("Resultado: Atacante perde %d, Defensor perde %d\n", atkLoss, defLoss);
+
+    // se defensor ficou sem tropas, território é conquistado
+    if (defensor->troops <= 0) {
+        printf("Território %s conquistado!\n", defensor->name);
+        // mover propriedade
+        defensor->owner = atacante->owner;
+
+        // Determinar quantas tropas mover:
+        // Podemos mover no máximo initialAtk - 1 (regra do Risk),
+        // e não podemos mover mais tropas do que o atacante tem após perdas.
+        int maxMove = initialAtk - 1;
+        if (maxMove < 1) maxMove = 1;
+
+        int availableAfterLoss = atacante->troops; // tropas que restaram no atacante
+        // idealmente queremos deixar 1 tropa no origin, então máximo movível é availableAfterLoss - 1
+        int move = maxMove;
+        if (availableAfterLoss - 1 < move) {
+            // ajustar para o máximo possível sem deixar origem vazia, quando possível
+            move = availableAfterLoss - 1;
+        }
+        if (move < 1) {
+            // caso extremo: atacante ficou com 0 ou 1 tropa após perdas.
+            // Forçar mover 1 para ocupar o território (aceita deixar origem com 0 neste caso extremo).
+            move = 1;
+        }
+
+        // atualizar tropas (atenção: pode deixar origem com 0 em cenários extremos)
+        atacante->troops = availableAfterLoss - move;
+        if (atacante->troops < 0) atacante->troops = 0;
+        defensor->troops = move;
+
+        printf("%d tropa(s) movida(s) para %s.\n", move, defensor->name);
+    }
+}
+
+Mission sortearMissao(enum Color jogador) {
+    Mission m;
+    m.id = (rand() % NUM_MISSIONS) + 1;
+    if (m.id == M_DESTROY_ARMY) {
+        m.type = M_DESTROY_ARMY;
+        // escolher exército para destruir diferente do jogador
+        enum Color choices[] = { RED, BLUE, GREEN, YELLOW, BLACK };
+        int nchoices = sizeof(choices)/sizeof(choices[0]);
+        enum Color sel = NONE;
+        while (1) {
+            sel = choices[rand() % nchoices];
+            if (sel != jogador) break;
+        }
+        m.targetColor = sel;
+        m.targetCount = 0;
+    } else {
+        m.type = M_CONQUER_N_TERRITORIES;
+        m.targetColor = NONE;
+        // alvo entre 3 e 6 territórios
+        m.targetCount = (rand() % 4) + 3;
+    }
+    return m;
+}
+
+int verificarVitoria(const Territory* map, size_t n, const Mission* m, enum Color playerColor) {
+    if (!m) return 0;
+    if (m->type == M_DESTROY_ARMY) {
+        // verifica se não existe mais território com owner == targetColor
+        for (size_t i = 0; i < n; ++i) {
+            if (map[i].owner == m->targetColor) return 0; // ainda existe exército alvo
+        }
+        return 1;
+    } else if (m->type == M_CONQUER_N_TERRITORIES) {
+        int count = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (map[i].owner == playerColor) count++;
+        }
+        return (count >= m->targetCount) ? 1 : 0;
+    }
+    return 0;
+}
+
+const char* nomeCor(enum Color c) {
+    switch (c) {
+        case RED: return "Vermelho";
+        case BLUE: return "Azul";
+        case GREEN: return "Verde";
+        case YELLOW: return "Amarelo";
+        case BLACK: return "Preto";
+        case NONE: return "Ninguem";
+        default: return "Desconhecido";
+    }
+}
+
+/* ---------- Main ---------- */
+
+int main(void) {
+    // 1. Setup inicial
+    setlocale(LC_ALL, ""); // tenta usar locale do sistema (Português se configurado)
+    srand((unsigned int) time(NULL));
+
+    Territory* mapa = alocarMapa(NUM_TERRITORIES);
+    if (!mapa) {
+        fprintf(stderr, "Falha na alocação de memória.\n");
+        return EXIT_FAILURE;
+    }
+
+    inicializarTerritorios(mapa, NUM_TERRITORIES);
+
+    // Definir cor do jogador (para exemplo, permitimos escolher)
+    printf("Escolha a sua cor:\n");
+    printf("1 - Vermelho\n2 - Azul\n3 - Verde\n4 - Amarelo\n5 - Preto\n");
+    int c = lerInteiro("Escolha (1-5): ", 1, 5);
+    enum Color playerColor = (enum Color) c;
+
+    // Sortear missão
+    Mission minhaMissao = sortearMissao(playerColor);
+
+    // Game loop
+    int opcao = -1;
+    do {
+        exibirMapa(mapa, NUM_TERRITORIES);
+        exibirMissao(&minhaMissao);
+        exibirMenuPrincipal();
+        opcao = lerInteiro(NULL, 0, 2);
+        switch (opcao) {
+            case 1:
+                faseDeAtaque(mapa, NUM_TERRITORIES, playerColor);
+                pausarTela();
+                break;
+            case 2: {
+                int vence = verificarVitoria(mapa, NUM_TERRITORIES, &minhaMissao, playerColor);
+                if (vence) {
+                    printf("\n*** PARABÉNS! Você cumpriu a missão! ***\n");
+                } else {
+                    printf("\nVocê ainda não cumpriu a missão. Continue jogando.\n");
+                }
+                pausarTela();
+                break;
+            }
+            case 0:
+                printf("Encerrando o jogo. Até mais!\n");
+                break;
+            default:
+                printf("Opção inválida.\n");
+                pausarTela();
+                break;
+        }
+    } while (opcao != 0);
+
+    // limpeza
+    liberarMemoria(mapa);
+    return 0;
+}
 
